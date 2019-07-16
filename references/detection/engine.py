@@ -3,6 +3,11 @@ import sys
 import time
 import torch
 
+try:
+    from apex import amp
+except ImportError:
+    amp = None
+
 import torchvision.models.detection.mask_rcnn
 
 from coco_utils import get_coco_api_from_dataset
@@ -10,10 +15,11 @@ from coco_eval import CocoEvaluator
 import utils
 
 
-def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq):
+def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq, apex=False):
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    metric_logger.add_meter('img/s', utils.SmoothedValue(window_size=10, fmt='{value}'))
     header = 'Epoch: [{}]'.format(epoch)
 
     lr_scheduler = None
@@ -24,6 +30,7 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq):
         lr_scheduler = utils.warmup_lr_scheduler(optimizer, warmup_iters, warmup_factor)
 
     for images, targets in metric_logger.log_every(data_loader, print_freq, header):
+        start_time = time.time()
         images = list(image.to(device) for image in images)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
@@ -43,14 +50,20 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq):
             sys.exit(1)
 
         optimizer.zero_grad()
-        losses.backward()
+        if apex:
+            with amp.scale_loss(losses, optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            losses.backward()
         optimizer.step()
 
         if lr_scheduler is not None:
             lr_scheduler.step()
 
+        batch_size = len(images)
         metric_logger.update(loss=losses_reduced, **loss_dict_reduced)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        metric_logger.meters['img/s'].update(batch_size / (time.time() - start_time))
 
 
 def _get_iou_types(model):
