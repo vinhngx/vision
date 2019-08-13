@@ -82,20 +82,18 @@ def _get_cache_path(filepath):
 
 
 def main(args):
-    if args.output_dir:
-        utils.mkdir(args.output_dir)
-
-    utils.init_distributed_mode(args)
-    print(args)
-
     if args.apex:
         if sys.version_info < (3, 0):
             raise RuntimeError("Apex currently only supports Python 3. Aborting.")
         if amp is None:
             raise RuntimeError("Failed to import apex. Please install apex from https://www.github.com/nvidia/apex "
                                "to enable mixed-precision training.")
-        if args.distributed:
-            torch.cuda.set_device(args.gpu)
+
+    if args.output_dir:
+        utils.mkdir(args.output_dir)
+
+    utils.init_distributed_mode(args)
+    print(args)
 
     device = torch.device(args.device)
 
@@ -181,10 +179,6 @@ def main(args):
         model, optimizer = amp.initialize(model, optimizer,
                                           opt_level=args.apex_opt_level
                                           )
-    model_without_ddp = model
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        model_without_ddp = model.module
 
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
 
