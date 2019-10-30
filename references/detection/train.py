@@ -12,6 +12,7 @@ If you use different number of gpus, the learning rate should be changed to 0.02
 import datetime
 import os
 import time
+import sys
 
 import torch
 import torch.utils.data
@@ -25,9 +26,17 @@ from coco_utils import get_coco, get_coco_kp
 from group_by_aspect_ratio import GroupedBatchSampler, create_aspect_ratio_groups
 from engine import train_one_epoch, evaluate
 
+# +
 import utils
 import transforms as T
 
+try:
+    from apex import amp
+except ImportError:
+    amp = None
+
+
+# -
 
 def get_dataset(name, image_set, transform, data_path):
     paths = {
@@ -51,6 +60,13 @@ def get_transform(train):
 def main(args):
     utils.init_distributed_mode(args)
     print(args)
+
+    if args.apex:
+        if sys.version_info < (3, 0):
+            raise RuntimeError("Apex currently only supports Python 3. Aborting.")
+        if amp is None:
+            raise RuntimeError("Failed to import apex. Please install apex from https://www.github.com/nvidia/apex "
+                               "to enable mixed-precision training.")
 
     device = torch.device(args.device)
 
@@ -89,18 +105,22 @@ def main(args):
                                                               pretrained=args.pretrained)
     model.to(device)
 
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.SGD(
+        params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+        
+    # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
+    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.lr_steps, gamma=args.lr_gamma)
+
+    if args.apex:
+        model, optimizer = amp.initialize(model, optimizer,
+                                          opt_level=args.apex_opt_level
+                                          )
     model_without_ddp = model
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
-
-    params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(
-        params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-
-    # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
-    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.lr_steps, gamma=args.lr_gamma)
-
+        
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu')
         model_without_ddp.load_state_dict(checkpoint['model'])
@@ -116,7 +136,7 @@ def main(args):
     for epoch in range(args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
-        train_one_epoch(model, optimizer, data_loader, device, epoch, args.print_freq)
+        train_one_epoch(model, optimizer, data_loader, device, epoch, args.print_freq, args.apex)
         lr_scheduler.step()
         if args.output_dir:
             utils.save_on_master({
@@ -177,6 +197,15 @@ if __name__ == "__main__":
         action="store_true",
     )
 
+    # Mixed precision training parameters
+    parser.add_argument('--apex', action='store_true',
+                        help='Use apex for mixed precision training')
+    parser.add_argument('--apex-opt-level', default='O1', type=str,
+                        help='For apex mixed precision training'
+                             'O0 for FP32 training, O1 for mixed precision training.'
+                             'For further detail, see https://github.com/NVIDIA/apex/tree/master/examples/imagenet'
+                        )
+    
     # distributed training parameters
     parser.add_argument('--world-size', default=1, type=int,
                         help='number of distributed processes')
